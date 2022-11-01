@@ -1,11 +1,72 @@
 from multiprocessing import Process, Manager
-from datetime import datetime
+from unidecode import unidecode
 from threading import Thread
 from time import sleep
 from lxml import html
 import requests
+import datetime
 import csv
 import re
+
+def arrumar_datas(sem_duplicatas: list) -> list:
+    def separar_conjunto(sem_duplicatas: list, inicio: int) -> tuple:
+        temp = 0
+        conjunto = []
+        chave_da_vez = None
+        
+        # Separa os elementos semelhantes.
+        for i in range(inicio, len(sem_duplicatas)):
+            temp = i
+
+            if not isinstance(sem_duplicatas[i][-2], datetime.date) and chave_da_vez == None:
+                chave_da_vez = sem_duplicatas[i][0]
+
+            if sem_duplicatas[i][0] != chave_da_vez and chave_da_vez != None:
+                inicio = i
+                return (conjunto, inicio)
+
+            conjunto.append(sem_duplicatas[i])
+        
+        # Caso termine o loop sem dar return.
+        inicio = temp
+        return (conjunto, inicio)
+
+    lista_corrigida = []
+    inicio = 0
+
+    while True:
+        conjunto, inicio = separar_conjunto(sem_duplicatas, inicio)    
+
+        # Trabalha no conjunto de semelhantes.
+        while True:
+            if len(conjunto) == 0:
+                break
+
+            para_deletar = []
+            periodo_selecionado = None
+
+            for elem in conjunto:
+                if periodo_selecionado == None:
+                    periodo_selecionado = elem[-1] + datetime.timedelta(days = 1461) # 4 anos.
+
+                if elem[-1] < periodo_selecionado:
+                    para_deletar.append(elem)
+
+            conjunto = [elem for elem in conjunto if elem not in para_deletar]       
+
+            para_deletar = sorted(para_deletar, key = lambda lista: lista[-1])
+            
+            lista_corrigida.append([
+                para_deletar[0][1],
+                para_deletar[0][2],
+                para_deletar[0][3],
+                para_deletar[-1][-1]
+            ])
+
+        if inicio == len(sem_duplicatas) - 1:
+            break
+
+    return lista_corrigida
 
 def dividir_lista(quantidade, lista):
     return [lista[i::quantidade] for i in range(quantidade)]
@@ -29,7 +90,15 @@ def buscar_ministros(lista, todas_listas):
 
         data = data.replace(" de ", "-")
         data = data.split("-")
-        return datetime.strptime(f"{data[2]}-{meses[data[1].lower()]}-{data[0]}", "%Y-%m-%d").date()
+        return datetime.datetime.strptime(f"{data[2]}-{meses[data[1].lower()]}-{data[0]}", "%Y-%m-%d").date()
+
+    def criar_chave(elemento):
+        chave = f"{elemento[0]} {elemento[1]}"
+        chave = unidecode(chave)
+        for stopword in (" da ", " de ", " do ", " das ", " dos "):
+            if stopword in chave:
+                chave = chave.replace(stopword, " ")
+        return chave.lower()
 
     for link in lista:
         while True:
@@ -66,10 +135,20 @@ def buscar_ministros(lista, todas_listas):
                 text = [elem for elem in text if not "\n" in elem]
 
                 # Remove mais informação inútil das linhas.
-                text = [elem for elem in text if elem.lower() not in ("cargo vago", "sem partido", "vago")]
+                lista_dejetos = ("carece de", "sem partido", "vago", "independente", "epublican", "união brasil", "gressistas", "atriota", "definir", "pps", "  ", "")
+                text = [elem for elem in text if not any([string for string in lista_dejetos if string in elem.lower()])]
 
                 # Filtra números (índice da tabela; valores monetários; etc) mas deixa datas (por extenso) passar.
                 text = [elem for elem in text if not (any(char.isdigit() for char in elem) and not ' de ' in elem)]
+
+                # Removendo adendos inúteis aos nomes das pessoas.
+                for index, elem in enumerate(text):
+                    for palavra in ("(interino)", "(posse pendente)"):
+                        if palavra in elem:
+                            text[index] = text[index].replace(palavra, "")
+
+                # A remoção dos adendos pode deixar um espaço residual na frente do nome das pessoas.
+                text = [elem[:-1] if elem[-1] == " " else elem for elem in text]
 
                 # Ignora o header de cada tabela.
                 if any(elem for elem in text if elem in ("Ministério", "Partido")):
@@ -105,6 +184,8 @@ def buscar_ministros(lista, todas_listas):
                     #print([elem.text_content() for elem in linha])
                     continue
 
+                text.insert(0, criar_chave(text))
+
                 todas_listas.append(text)
                 print(text)
 
@@ -114,6 +195,7 @@ def processo(lista, todas_listas):
         Thread(target = buscar_ministros, args = (sublista, todas_listas, )).start()
 
 if __name__ == "__main__":
+    # Essa lista vai ficar defasada, com o passar do tempo; TO-DO: fazer isso ficar dinâmico, puxando direto da Wikipédia.
     historico_wikipedia = [
         'https://pt.wikipedia.org/w/index.php?title=Minist%C3%A9rios_do_Brasil&action=history&dir=prev&offset=20160601211004%7C45771511&limit=500',
         'https://pt.wikipedia.org/w/index.php?title=Minist%C3%A9rios_do_Brasil&action=history&offset=20160602031248%7C45774870&limit=500',
@@ -144,9 +226,24 @@ if __name__ == "__main__":
         for p in processos:
             p.join()
     
-    final = sorted(list(todas_listas), key = lambda lista: lista[-1])
+    sem_duplicatas = list(set(tuple(element) for element in list(todas_listas)))
+    sem_duplicatas = sorted(sem_duplicatas, key = lambda lista: lista[0])
+    sem_duplicatas = arrumar_datas(sem_duplicatas)
 
-    with open('ministros.csv', 'w', newline='', encoding='utf-8') as f:
+    # Alguns elementos passam por todas as filtragens, coisa de uns 10.
+    # Como alguns deles ainda parecem estar preenchidos com dados 
+    # errados/duvidosos, vai tudo pra vala.
+    for elem in sem_duplicatas:
+        if type(elem[-2]) == str:
+            sem_duplicatas.remove(elem)
+
+    final = sorted(
+        sem_duplicatas, 
+        reverse = True, 
+        key = lambda lista: lista[-2]
+    )
+
+    with open(f'ministros.csv', 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         for elem in final:
             writer.writerow(elem)
